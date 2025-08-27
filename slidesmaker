@@ -1,0 +1,223 @@
+#!/bin/sh
+
+# Limpa lixos antigos
+rm -rf $(ls -d slidesmaker.*)
+
+echo "------------------------------------"
+echo "SlidesMaker 0.0.1"
+echo "------------------------------------"
+
+TEMP_DIR=$(mktemp -d slidesmaker.XXXXXX)
+FADE_DURATION="4"
+
+PROGRAM=$0
+IMAGE_DIR="$1"
+AUDIO_FILE="$2"
+OUTPUT_FILE="$3"
+DEV_MODE="$4"
+
+# ------------------------------------------------------
+# DEPENDÊNCIAS
+# ------------------------------------------------------
+
+# FFmpeg não está instalado
+FFMPEG=$(command -v ffmpeg &> /dev/null; echo $?)
+if [ "$FFMPEG" == "1" ]; then
+    echo "FFmpeg não está instalado."
+    echo "Ele é necessário para fabricar o vídeo."
+
+    exit 1
+fi
+
+# ------------------------------------------------------
+# ARGUMENTOS OBRIGATÓRIOS
+# ------------------------------------------------------
+
+# Caminho das imagens não foi informado
+if [ "$IMAGE_DIR" == "" ] || [ "$AUDIO_FILE" == "" ]; then
+    echo "Uso: $PROGRAM <diretório das imagens> <arquivo de audio> [<arquivo de saída>] [--dev]"
+
+    exit 1
+fi
+
+# Caminho das imagens não é um diretório
+IMAGE_DIR=$(realpath $IMAGE_DIR)
+if [ ! -d "$IMAGE_DIR" ]; then
+    echo "O diretório '$IMAGE_DIR' não existe."
+
+    exit 1
+fi
+
+# Caminho do áudio não é um arquivo
+AUDIO_FILE=$(realpath $AUDIO_FILE)
+if [ ! -f "$AUDIO_FILE" ]; then
+    echo "O arquivo de áudio '$AUDIO_FILE' não existe."
+
+    exit 1
+fi
+
+# ------------------------------------------------------
+# ARGUMENTOS OPCIONAIS
+# ------------------------------------------------------
+
+if [ "$OUTPUT_FILE" == "--debug" ]; then
+    DEV_MODE="1"
+    OUTPUT_FILE="video.mp4"
+fi
+
+if [ "$OUTPUT_FILE" == "" ]; then
+    OUTPUT_FILE="video.mp4"
+fi
+
+if [ "$DEV_MODE" == "--debug" ]; then
+    DEV_MODE="1"
+fi
+
+if [ "$DEV_MODE" != "1" ]; then
+    DEV_MODE="0"
+fi
+
+ffmpeg -version | head -n 1
+echo ""
+
+if [ "$DEV_MODE" == "1" ]; then
+    echo "Modo desenvolvedor"
+    echo "------------------------------------"
+    echo "Diretório das imagens: $IMAGE_DIR"
+    echo "Arquivo de áudio: $AUDIO_FILE"
+    echo "Arquivo de saída: $OUTPUT_FILE"
+    echo "Modo debug: $DEV_MODE"
+    echo ""
+fi
+
+IMAGE_COUNT=$(ls -1 $IMAGE_DIR | wc -l)
+
+# ------------------------------------------------------
+# INFORMAÇÕES DO ÁUDIO
+# ------------------------------------------------------
+
+if [ "$DEV_MODE" == "1" ]; then
+    AUDIO_SECONDS=$(($IMAGE_COUNT * 4))
+else
+    # Obtem a duração do áudio em segundos
+    AUDIO_SECONDS=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$AUDIO_FILE")
+    AUDIO_SECONDS=$(echo $AUDIO_SECONDS | awk '{printf "%.0f\n", $1}') # Remove casas decimais
+fi
+
+echo "A duração do áudio é de $AUDIO_SECONDS segundos"
+
+# ------------------------------------------------------
+# INFORMAÇÕES DAS IMAGENS
+# ------------------------------------------------------
+
+if [ "$DEV_MODE" == "1" ]; then
+    # slides curtos em modo desenvolvedor
+    IMAGE_DURATION=$(($FADE_DURATION + 4))
+else
+    IMAGE_DURATION=$(($AUDIO_SECONDS/$IMAGE_COUNT))
+fi
+
+echo "A duração de cada slide será de $(($IMAGE_DURATION - $FADE_DURATION)) segundos"
+
+
+# ------------------------------------------------------
+# FABRICA O VIDEO COM TRANSIÇÕES
+# ------------------------------------------------------
+
+INDEX="1"
+for IMAGE_FILE in $IMAGE_DIR/*.{jpg,jpeg,png}; do
+    if [[ -f "$IMAGE_FILE" ]]; then
+        echo "Processando slide: $IMAGE_FILE"
+
+        #     -c:v libopenh264 -crf 0 \
+        ffmpeg -loop 1 -framerate 30 -i "$IMAGE_FILE" -t $IMAGE_DURATION \
+            -c:v copy \
+            $TEMP_DIR/video$INDEX.mp4 &> /dev/null
+    fi
+
+    INDEX=$(($INDEX + 1))
+done
+
+echo "Processando transições..."
+
+ffmpeg \
+    -i $TEMP_DIR/video1.mp4 \
+    -i $TEMP_DIR/video2.mp4 \
+    -i $TEMP_DIR/video3.mp4 \
+    -i $TEMP_DIR/video4.mp4 \
+    -filter_complex "
+        [0:v][1:v]xfade=transition=fade:duration=$FADE_DURATION:offset=$((($IMAGE_DURATION-$FADE_DURATION)*1))[mix1];
+        [mix1][2:v]xfade=transition=fade:duration=$FADE_DURATION:offset=$((($IMAGE_DURATION-$FADE_DURATION)*2))[mix2];
+        [mix2][3:v]xfade=transition=fade:duration=$FADE_DURATION:offset=$((($IMAGE_DURATION-$FADE_DURATION)*3))[mix3]
+    " \
+    -map "[mix3]" \
+    -c:v libopenh264 -b:v 10000k \
+    $TEMP_DIR/mixed.mp4 &> /dev/null
+
+rm -f $TEMP_DIR/video*.mp4
+
+# ------------------------------------------------------
+# ADICIONA O AUDIO
+# ------------------------------------------------------
+
+echo "Fabricando animação wave..."
+
+WAVE_DIMENSIONS=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of default=nw=1:nk=1 $TEMP_DIR/mixed.mp4)
+WAVE_DIMENSIONS=($WAVE_DIMENSIONS)
+
+ffmpeg -y -i $AUDIO_FILE \
+    -t $AUDIO_SECONDS \
+    -filter_complex "
+        [0:a]aformat=channel_layouts=mono,showwaves=s=${WAVE_DIMENSIONS[0]}x${WAVE_DIMENSIONS[1]}:mode=cline:colors=white|white|white:r=30:draw=full[v1];
+        [v1]dilation=threshold3=50[v2]
+    " \
+    -map "[v2]" -map 0:a \
+    -b:a 360k -r:a 44100 \
+    -c:v libopenh264 -b:v 10000k \
+    $TEMP_DIR/waveform.mp4 &> /dev/null
+
+ffmpeg -y \
+    -t $AUDIO_SECONDS \
+    -i $TEMP_DIR/waveform.mp4 \
+    -i ./barras.png \
+    -filter_complex "
+        [1]split[m][a];
+        [a]geq='if(gt(lum(X,Y),24),0,255)',hue=s=0[al];
+        [m][al]alphamerge[ovr];
+        [0][ovr]overlay=0:0
+    " \
+    -shortest \
+    -c:a copy \
+    -c:v libopenh264 -b:v 10000k \
+    $TEMP_DIR/waveform_bars.mp4 &> /dev/null
+
+WAVE_PADDING="400"
+WAVE_WIDTH="$((${WAVE_DIMENSIONS[0]} - $WAVE_PADDING))"
+WAVE_HEIGTH=$((${WAVE_DIMENSIONS[1]} / 2))
+WAVE_X=$((${WAVE_DIMENSIONS[0]} / 2 - $WAVE_WIDTH / 2))
+WAVE_Y=$((${WAVE_DIMENSIONS[1]} - $WAVE_HEIGTH))
+
+echo "Adicionando audio..."
+
+ffmpeg -y \
+    -t $AUDIO_SECONDS \
+    -i $TEMP_DIR/mixed.mp4 \
+    -i $TEMP_DIR/waveform_bars.mp4 \
+    -filter_complex "
+        [1]split[m][a];
+        [a]geq='if(gt(lum(X,Y),24),255,0)',hue=s=0[al];
+        [m][al]alphamerge,colorchannelmixer=aa=0.8,scale=$(($WAVE_WIDTH*2)):$WAVE_HEIGTH,crop=$WAVE_WIDTH:$WAVE_HEIGTH:0:0[ovr];
+        [0][ovr]overlay=$WAVE_X:$WAVE_Y
+    " \
+    -shortest \
+    -c:a copy \
+    -c:v libopenh264 -b:v 10000k \
+    $TEMP_DIR/final.mp4 &> /dev/null
+
+mv $TEMP_DIR/final.mp4 $OUTPUT_FILE
+
+rm -Rf $TEMP_DIR
+
+echo "Processo concluído!"
+echo "Arquivo de saída: $OUTPUT_FILE"
+
