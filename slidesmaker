@@ -9,8 +9,9 @@ FADE_DURATION="4"
 PROGRAM=$0
 IMAGE_DIR="$1"
 AUDIO_FILE="$2"
-OUTPUT_FILE="$3"
-DEV_MODE="$4"
+PARTICLES_FILE="$3"
+OUTPUT_FILE="$4"
+DEV_MODE="$5"
 
 # determina o caminho completo para este arquivo
 ROOT_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
@@ -59,7 +60,12 @@ fi
 # ARGUMENTOS OPCIONAIS
 # ------------------------------------------------------
 
-if [ "$OUTPUT_FILE" == "--debug" ]; then
+if [ "$PARTICLES_FILE" == "--dev" ]; then
+    DEV_MODE="1"
+    OUTPUT_FILE="video.mp4"
+fi
+
+if [ "$OUTPUT_FILE" == "--dev" ]; then
     DEV_MODE="1"
     OUTPUT_FILE="video.mp4"
 fi
@@ -84,6 +90,7 @@ if [ "$DEV_MODE" == "1" ]; then
     echo "------------------------------------"
     echo "Diretório das imagens: $IMAGE_DIR"
     echo "Arquivo de áudio: $AUDIO_FILE"
+    echo "Arquivo de partículas: $PARTICLES_FILE"
     echo "Arquivo de saída: $OUTPUT_FILE"
     echo "Modo debug: $DEV_MODE"
     echo ""
@@ -94,6 +101,8 @@ IMAGE_COUNT=$(ls -1 $IMAGE_DIR | wc -l)
 # ------------------------------------------------------
 # INFORMAÇÕES DO ÁUDIO
 # ------------------------------------------------------
+
+rm -Rf slidesmaker.* # lixo
 
 if [ "$DEV_MODE" == "1" ]; then
     AUDIO_SECONDS=$(($IMAGE_COUNT * 4))
@@ -120,9 +129,6 @@ else
     IMAGE_DURATION=$(($AUDIO_SECONDS/$IMAGE_COUNT))
 fi
 
-echo "A duração de cada slide será de $(($IMAGE_DURATION - $FADE_DURATION)) segundos"
-
-
 # ------------------------------------------------------
 # FABRICA O VIDEO COM TRANSIÇÕES
 # ------------------------------------------------------
@@ -130,7 +136,7 @@ echo "A duração de cada slide será de $(($IMAGE_DURATION - $FADE_DURATION)) s
 INDEX="1"
 for IMAGE_FILE in $IMAGE_DIR/*.{jpg,jpeg,png}; do
     if [[ -f "$IMAGE_FILE" ]]; then
-        echo "Processando slide: $IMAGE_FILE"
+        echo "Slide: $IMAGE_FILE"
 
         #     -c:v libopenh264 -crf 0 \
         ffmpeg -loop 1 -framerate 30 -i "$IMAGE_FILE" -t $IMAGE_DURATION \
@@ -141,6 +147,7 @@ for IMAGE_FILE in $IMAGE_DIR/*.{jpg,jpeg,png}; do
     INDEX=$(($INDEX + 1))
 done
 
+echo "A duração de cada slide será de $(($IMAGE_DURATION - $FADE_DURATION)) segundos"
 echo "Processando transições..."
 
 ffmpeg \
@@ -157,7 +164,39 @@ ffmpeg \
     -c:v libopenh264 -b:v 10000k \
     $TEMP_DIR/mixed.mp4 &> /dev/null
 
-rm -f $TEMP_DIR/video*.mp4
+VIDEO_DIMENSIONS=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of default=nw=1:nk=1 $TEMP_DIR/mixed.mp4)
+VIDEO_DIMENSIONS=($VIDEO_DIMENSIONS)
+
+# ------------------------------------------------------
+# ADICIONA PARTÍCULAS
+# ------------------------------------------------------
+
+if [ "$PARTICLES_FILE" != "" ]; then
+    PARTICLES_FILE=$(realpath $PARTICLES_FILE)
+
+    echo "Adicionando partículas: $PARTICLES_FILE"
+
+    ffmpeg -y \
+        -i $PARTICLES_FILE \
+        -vf scale=${VIDEO_DIMENSIONS[0]}x${VIDEO_DIMENSIONS[1]} \
+        -c:v libopenh264 -b:v 10000k \
+        $TEMP_DIR/particles.mp4 &> /dev/null
+
+    ffmpeg -y \
+        -t $AUDIO_SECONDS \
+        -i $TEMP_DIR/mixed.mp4 \
+        -i $TEMP_DIR/particles.mp4 \
+        -filter_complex "
+            [0][1]blend=all_opacity=0.8,format=rgba
+        " \
+        -shortest \
+        -c:a copy \
+        -c:v libopenh264 -b:v 10000k \
+        $TEMP_DIR/mixed-particles.mp4  &> /dev/null
+
+    mv $TEMP_DIR/mixed-particles.mp4 $TEMP_DIR/mixed.mp4
+fi
+
 
 # ------------------------------------------------------
 # ADICIONA O AUDIO
@@ -165,13 +204,10 @@ rm -f $TEMP_DIR/video*.mp4
 
 echo "Fabricando animação wave..."
 
-WAVE_DIMENSIONS=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of default=nw=1:nk=1 $TEMP_DIR/mixed.mp4)
-WAVE_DIMENSIONS=($WAVE_DIMENSIONS)
-
 ffmpeg -y -i $AUDIO_FILE \
     -t $AUDIO_SECONDS \
     -filter_complex "
-        [0:a]aformat=channel_layouts=mono,showwaves=s=${WAVE_DIMENSIONS[0]}x${WAVE_DIMENSIONS[1]}:mode=cline:colors=white|white|white:r=30:draw=full[v1];
+        [0:a]aformat=channel_layouts=mono,showwaves=s=${VIDEO_DIMENSIONS[0]}x${VIDEO_DIMENSIONS[1]}:mode=cline:colors=white|white|white:r=30:draw=full[v1];
         [v1]dilation=threshold3=50[v2]
     " \
     -map "[v2]" -map 0:a \
@@ -205,10 +241,10 @@ ffmpeg -y \
     $TEMP_DIR/waveform_bars.mp4 &> /dev/null
 
 WAVE_PADDING="400"
-WAVE_WIDTH="$((${WAVE_DIMENSIONS[0]} - $WAVE_PADDING))"
-WAVE_HEIGTH=$((${WAVE_DIMENSIONS[1]} / 2))
-WAVE_X=$((${WAVE_DIMENSIONS[0]} / 2 - $WAVE_WIDTH / 2))
-WAVE_Y=$((${WAVE_DIMENSIONS[1]} - $WAVE_HEIGTH + ($WAVE_PADDING / 4)))
+WAVE_WIDTH="$((${VIDEO_DIMENSIONS[0]} - $WAVE_PADDING))"
+WAVE_HEIGTH=$(( ${VIDEO_DIMENSIONS[1]} / 2 ))
+WAVE_X=$(((${VIDEO_DIMENSIONS[0]} / 2) - ($WAVE_WIDTH / 2)))
+WAVE_Y=$((${VIDEO_DIMENSIONS[1]} - $WAVE_HEIGTH + ($WAVE_PADDING / 4)))
 
 echo "Adicionando audio..."
 
