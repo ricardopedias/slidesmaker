@@ -1,13 +1,9 @@
 #!/bin/sh
 
-# Limpa lixos antigos
-rm -rf $(ls -d slidesmaker.*)
-
 echo "------------------------------------"
 echo "SlidesMaker 0.0.1"
 echo "------------------------------------"
 
-TEMP_DIR=$(mktemp -d slidesmaker.XXXXXX)
 FADE_DURATION="4"
 
 PROGRAM=$0
@@ -15,6 +11,9 @@ IMAGE_DIR="$1"
 AUDIO_FILE="$2"
 OUTPUT_FILE="$3"
 DEV_MODE="$4"
+
+# determina o caminho completo para este arquivo
+ROOT_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
 
 # ------------------------------------------------------
 # DEPENDÊNCIAS
@@ -69,7 +68,7 @@ if [ "$OUTPUT_FILE" == "" ]; then
     OUTPUT_FILE="video.mp4"
 fi
 
-if [ "$DEV_MODE" == "--debug" ]; then
+if [ "$DEV_MODE" == "--dev" ]; then
     DEV_MODE="1"
 fi
 
@@ -98,10 +97,14 @@ IMAGE_COUNT=$(ls -1 $IMAGE_DIR | wc -l)
 
 if [ "$DEV_MODE" == "1" ]; then
     AUDIO_SECONDS=$(($IMAGE_COUNT * 4))
+
+    TEMP_DIR=$(mktemp -d slidesmaker.XXXXXX)
 else
     # Obtem a duração do áudio em segundos
     AUDIO_SECONDS=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$AUDIO_FILE")
     AUDIO_SECONDS=$(echo $AUDIO_SECONDS | awk '{printf "%.0f\n", $1}') # Remove casas decimais
+
+    TEMP_DIR=$(mktemp -d /tmp/slidesmaker.XXXXXX)
 fi
 
 echo "A duração do áudio é de $AUDIO_SECONDS segundos"
@@ -176,10 +179,20 @@ ffmpeg -y -i $AUDIO_FILE \
     -c:v libopenh264 -b:v 10000k \
     $TEMP_DIR/waveform.mp4 &> /dev/null
 
+WAVE_BARS="/usr/share/slidesmaker/barras.png"
+
+if [ ! -f "$WAVE_BARS" ]; then
+    WAVE_BARS="$ROOT_PATH/barras.png"
+fi
+
+if [ "$DEV_MODE" == "1" ]; then
+    echo "Arquivo de barras: $WAVE_BARS"
+fi
+
 ffmpeg -y \
     -t $AUDIO_SECONDS \
     -i $TEMP_DIR/waveform.mp4 \
-    -i ./barras.png \
+    -i $WAVE_BARS \
     -filter_complex "
         [1]split[m][a];
         [a]geq='if(gt(lum(X,Y),24),0,255)',hue=s=0[al];
@@ -195,7 +208,7 @@ WAVE_PADDING="400"
 WAVE_WIDTH="$((${WAVE_DIMENSIONS[0]} - $WAVE_PADDING))"
 WAVE_HEIGTH=$((${WAVE_DIMENSIONS[1]} / 2))
 WAVE_X=$((${WAVE_DIMENSIONS[0]} / 2 - $WAVE_WIDTH / 2))
-WAVE_Y=$((${WAVE_DIMENSIONS[1]} - $WAVE_HEIGTH))
+WAVE_Y=$((${WAVE_DIMENSIONS[1]} - $WAVE_HEIGTH + ($WAVE_PADDING / 4)))
 
 echo "Adicionando audio..."
 
